@@ -1,0 +1,36 @@
+name: Scan street imagery (Mapillary)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  imagery:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        region: [kizilay_merkez]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install requests pyyaml
+      - name: Fetch Mapillary
+        env:
+          MAPILLARY_TOKEN: ${{ secrets.MAPILLARY_TOKEN }}
+        run: python scripts/scan_imagery.py regions/${{ matrix.region }}.yaml out
+      - name: Upload to private data repo
+        env:
+          GH_TOKEN: ${{ secrets.DATA_REPO_TOKEN }}
+          DATA_REPO: NikinGames/maps-dataset-data
+        run: |
+          tag="imagery-$(date +%Y%m%d)"
+          tar -C out -czf ${{ matrix.region }}-street-$(date +%Y%m%d).tar.gz ${{ matrix.region }}
+          gh release view "$tag" -R "$DATA_REPO" >/dev/null 2>&1 || \
+            gh release create "$tag" -R "$DATA_REPO" --title "$tag" --notes "Mapillary scan $tag"
+          gh release upload "$tag" *.tar.gz -R "$DATA_REPO" --clobber
