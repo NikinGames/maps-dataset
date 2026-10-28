@@ -1,25 +1,33 @@
 # maps-dataset
 
-Open geospatial dataset pool for NikinGames projects (Ankara 3D World game, maps/SaaS).
-Regions are scanned automatically from open sources; nothing is hand-edited.
+Geospatial dataset pool for NikinGames projects (Ankara 3D World game, maps/SaaS).
+Regions are scanned on GitHub Actions; archives are stored privately.
 
-| Layer | Source | License |
+| Layer | Source | Workflow |
 |---|---|---|
-| Vector (buildings, roads, landuse, POIs) | OpenStreetMap via Overpass | ODbL 1.0 |
-| Elevation tiles | Copernicus DEM GLO-30 (AWS Terrain Tiles) | Copernicus licence, attribution |
+| OSM vector + Copernicus DEM | Overpass + AWS Terrarium | `scan.yml` (monthly + manual) |
+| Mapillary images | Mapillary Graph API | `scan-mapillary.yml` (manual) |
+| Google Street View panoramas | Street View Static API | `scan-streetview.yml` (manual) |
+| Google Photorealistic 3D Tiles | Map Tiles API | `scan-tiles3d.yml` (manual) |
 
-See [DATA_LICENSES.md](DATA_LICENSES.md). Never included: orthophotos, Google 3D tiles or
-anything derived from them.
+Fetch code lives in [`NikinGames/3dworldgame/pipeline/fetch`](https://github.com/NikinGames/3dworldgame/tree/main/pipeline/fetch).
+Scan scripts in `scripts/` call it. Each workflow uploads a `.tar.gz` to a dated
+release on the **private** `NikinGames/maps-dataset-data` repo (secret
+`DATA_REPO_TOKEN`); this public repo keeps no data of its own.
 
-## How it works
+## Required secrets
 
-- `regions/*.yaml` — one file per region (same schema as `3dworldgame/config/regions`).
-- `scan.yml` — matrix job: checks out the pipeline from `NikinGames/3dworldgame`, runs
-  `pipeline.cli fetch` per region, packs `data/raw/<id>` + DEM tiles + `manifest.json`
-  (sha256, bbox, fetch date) into one archive per region.
-- Data is stored privately: archives are uploaded as release assets of the private repo
-  `NikinGames/maps-dataset-data` (secret `DATA_REPO_TOKEN`). This public repo only holds code,
-  so Actions minutes are free and no data is redistributed. Zenodo publishing is optional
-  later (`.zenodo.json` kept for that).
+| Secret | Workflow | Where to get it |
+|---|---|---|
+| `DATA_REPO_TOKEN` | all | Fine-grained PAT, owner `NikinGames`, repo `maps-dataset-data`, Contents: Read and write |
+| `GOOGLE_SV_KEY` | Street View | Google Cloud → Maps JS/Static API, Street View Static API enabled |
+| `GOOGLE_MAPS_API_KEY` | 3D Tiles | Google Cloud → Map Tiles API enabled |
+| `MAPILLARY_TOKEN` | Mapillary | dashboard.mapillary.com → Developers → Access Tokens |
 
-Add a region: drop a YAML into `regions/`, add its id to the matrix in `scan.yml`.
+## Add a region
+
+Drop a YAML in `regions/` (same schema as `3dworldgame/config/regions/*.yaml`),
+add its id to the matrix in `scan.yml` or pick it as a workflow input.
+
+Attribution rules live in [DATA_LICENSES.md](DATA_LICENSES.md). Private archives
+are internal; redistribution and the Zenodo path (`.zenodo.json`) are off by default.

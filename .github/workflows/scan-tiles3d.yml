@@ -1,0 +1,59 @@
+name: Scan 3D Tiles
+
+on:
+  workflow_dispatch:
+    inputs:
+      region:
+        description: "Region id in regions/*.yaml"
+        required: true
+        default: kizilay_merkez
+      target_error:
+        description: "Target geometric error (smaller = finer LOD)"
+        required: false
+        default: "20"
+      max_tiles:
+        description: "Max tiles to download"
+        required: false
+        default: "500"
+
+permissions:
+  contents: write
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: NikinGames/3dworldgame
+          path: engine
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: engine/requirements.txt
+      - run: pip install -r engine/requirements.txt
+
+      - name: Fetch 3D Tiles
+        env:
+          GOOGLE_MAPS_API_KEY: ${{ secrets.GOOGLE_MAPS_API_KEY }}
+          T3D_ERROR: ${{ inputs.target_error }}
+          T3D_MAX_TILES: ${{ inputs.max_tiles }}
+        run: PYTHONPATH=engine python scripts/scan_tiles3d.py regions/${{ inputs.region }}.yaml out
+
+      - name: Pack
+        run: |
+          cp regions/${{ inputs.region }}.yaml DATA_LICENSES.md out/${{ inputs.region }}-tiles3d/
+          tar -C out -czf ${{ inputs.region }}-t3d-$(date +%Y%m%d).tar.gz ${{ inputs.region }}-tiles3d
+
+      - name: Upload to private data repo
+        env:
+          GH_TOKEN: ${{ secrets.DATA_REPO_TOKEN }}
+          DATA_REPO: NikinGames/maps-dataset-data
+        run: |
+          tag="t3d-$(date +%Y%m%d)"
+          gh release view "$tag" -R "$DATA_REPO" >/dev/null 2>&1 || \
+            gh release create "$tag" -R "$DATA_REPO" --title "$tag" --notes "3D Tiles scan $tag"
+          gh release upload "$tag" *.tar.gz -R "$DATA_REPO" --clobber

@@ -1,0 +1,71 @@
+name: Scan Mapillary
+
+on:
+  workflow_dispatch:
+    inputs:
+      region:
+        description: "Region id in regions/*.yaml"
+        required: true
+        default: kizilay_merkez
+      max_images:
+        description: "Cap (empty = all)"
+        required: false
+        default: ""
+      fetch_thumbs:
+        description: "Also download 1024-px thumbnails"
+        required: false
+        default: "0"
+
+permissions:
+  contents: write
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: NikinGames/3dworldgame
+          path: engine
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: engine/requirements.txt
+      - run: pip install -r engine/requirements.txt
+
+      - name: Scan Mapillary
+        env:
+          MAPILLARY_TOKEN: ${{ secrets.MAPILLARY_TOKEN }}
+          MLY_MAX: ${{ inputs.max_images }}
+          MLY_THUMBS: ${{ inputs.fetch_thumbs }}
+        run: |
+          python - <<'EOF'
+          import os, sys
+          sys.path.insert(0, "engine")
+          from pathlib import Path
+          from pipeline.config import load_region
+          from pipeline.fetch.mapillary import scan_region, token_from_env
+          region = load_region(f"regions/${{ inputs.region }}.yaml")
+          out = Path("out") / f"{region.id}-mapillary"
+          max_i = int(os.environ["MLY_MAX"]) if os.environ.get("MLY_MAX") else None
+          scan_region(region.bbox, out, token_from_env(), max_images=max_i,
+                      fetch_thumbs=os.environ.get("MLY_THUMBS")=="1")
+          EOF
+
+      - name: Pack
+        run: |
+          cp regions/${{ inputs.region }}.yaml DATA_LICENSES.md out/${{ inputs.region }}-mapillary/
+          tar -C out -czf ${{ inputs.region }}-mly-$(date +%Y%m%d).tar.gz ${{ inputs.region }}-mapillary
+
+      - name: Upload to private data repo
+        env:
+          GH_TOKEN: ${{ secrets.DATA_REPO_TOKEN }}
+          DATA_REPO: NikinGames/maps-dataset-data
+        run: |
+          tag="mly-$(date +%Y%m%d)"
+          gh release view "$tag" -R "$DATA_REPO" >/dev/null 2>&1 || \
+            gh release create "$tag" -R "$DATA_REPO" --title "$tag" --notes "Mapillary scan $tag"
+          gh release upload "$tag" *.tar.gz -R "$DATA_REPO" --clobber
