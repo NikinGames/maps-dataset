@@ -1,0 +1,62 @@
+name: Scan Çankaya MAKS
+
+on:
+  workflow_dispatch:
+    inputs:
+      region:
+        description: "Region id in regions/*.yaml"
+        required: true
+        default: kizilay_merkez
+      step_m:
+        description: "Grid cell size (metres) — küçültünce daha çok sorgu, daha yavaş"
+        required: false
+        default: "150"
+      sleep_s:
+        description: "Seconds between requests (saygı için 0.3+)"
+        required: false
+        default: "0.3"
+
+permissions:
+  contents: write
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: NikinGames/3dworldgame
+          path: engine
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: engine/requirements.txt
+      - run: pip install -r engine/requirements.txt
+
+      - name: Scan Çankaya WMS
+        run: |
+          cd engine
+          python -m pipeline.cli cankaya \
+            --region ../regions/${{ inputs.region }}.yaml \
+            --step ${{ inputs.step_m }} \
+            --sleep ${{ inputs.sleep_s }}
+          mkdir -p ../out/${{ inputs.region }}-cankaya
+          cp -r data/raw/cankaya/${{ inputs.region }}/. ../out/${{ inputs.region }}-cankaya/
+
+      - name: Pack
+        run: |
+          cp regions/${{ inputs.region }}.yaml DATA_LICENSES.md out/${{ inputs.region }}-cankaya/
+          tar -C out -czf ${{ inputs.region }}-cnk-$(date +%Y%m%d).tar.gz ${{ inputs.region }}-cankaya
+
+      - name: Upload to private data repo
+        env:
+          GH_TOKEN: ${{ secrets.DATA_REPO_TOKEN }}
+          DATA_REPO: NikinGames/maps-dataset-data
+        run: |
+          tag="cnk-$(date +%Y%m%d)"
+          gh release view "$tag" -R "$DATA_REPO" >/dev/null 2>&1 || \
+            gh release create "$tag" -R "$DATA_REPO" --title "$tag" --notes "Çankaya MAKS scan $tag"
+          gh release upload "$tag" *.tar.gz -R "$DATA_REPO" --clobber
