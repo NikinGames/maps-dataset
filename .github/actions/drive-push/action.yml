@@ -1,0 +1,36 @@
+name: "Drive push"
+description: "Push archives to a configured rclone remote (noop if secret absent)."
+inputs:
+  pattern:
+    description: "Glob pattern of files to upload"
+    required: false
+    default: "*.tar.gz"
+  subpath:
+    description: "Subdirectory under DRIVE_ROOT"
+    required: true
+  rclone_conf:
+    description: "RCLONE_CONF secret value"
+    required: true
+  drive_remote:
+    description: "rclone remote name (default: gdrive)"
+    required: false
+    default: "gdrive"
+  drive_root:
+    description: "Base path on the remote (default: ankara3d/data)"
+    required: false
+    default: "ankara3d/data"
+runs:
+  using: "composite"
+  steps:
+    - shell: bash
+      run: |
+        if [ -z "${{ inputs.rclone_conf }}" ]; then
+          echo "RCLONE_CONF yok, Drive adımı atlandı."
+          exit 0
+        fi
+        curl -s https://rclone.org/install.sh | sudo bash
+        mkdir -p ~/.config/rclone
+        printf '%s' "${{ inputs.rclone_conf }}" > ~/.config/rclone/rclone.conf
+        dest="${{ inputs.drive_remote }}:${{ inputs.drive_root }}/${{ inputs.subpath }}/"
+        rclone copy ${{ inputs.pattern }} "$dest" --progress
+        echo "Drive'a yazıldı: $dest"

@@ -57,3 +57,10 @@ jobs:
           gh release view "$tag" -R "$DATA_REPO" >/dev/null 2>&1 || \
             gh release create "$tag" -R "$DATA_REPO" --title "$tag" --notes "Street View scan $tag"
           gh release upload "$tag" *.tar.gz -R "$DATA_REPO" --clobber
+
+      - name: Push to Google Drive
+        uses: ./.github/actions/drive-push
+        with:
+          pattern: "*.tar.gz"
+          subpath: streetview
+          rclone_conf: ${{ secrets.RCLONE_CONF }}

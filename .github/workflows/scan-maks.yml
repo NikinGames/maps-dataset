@@ -1,18 +1,22 @@
-name: Scan Çankaya MAKS
+name: Scan MAKS (belediye GeoServer'ları)
 
 on:
   workflow_dispatch:
     inputs:
       region:
-        description: "Region id in regions/*.yaml"
+        description: "regions/*.yaml içindeki id"
         required: true
         default: kizilay_merkez
+      sources:
+        description: "boşluk ayrımlı kaynak id'leri (boş = engine'deki tümü)"
+        required: false
+        default: "cankaya"
       step_m:
-        description: "Grid cell size (metres) — küçültünce daha çok sorgu, daha yavaş"
+        description: "Grid hücresi (m)"
         required: false
         default: "150"
       sleep_s:
-        description: "Seconds between requests (saygı için 0.3+)"
+        description: "İstek arası uyku (s)"
         required: false
         default: "0.3"
 
@@ -22,7 +26,7 @@ permissions:
 jobs:
   scan:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
       - uses: actions/checkout@v4
@@ -36,27 +40,35 @@ jobs:
           cache-dependency-path: engine/requirements.txt
       - run: pip install -r engine/requirements.txt
 
-      - name: Scan Çankaya WMS
+      - name: Scan MAKS
         run: |
           cd engine
-          python -m pipeline.cli cankaya \
+          python -m pipeline.cli maks \
             --region ../regions/${{ inputs.region }}.yaml \
+            --sources ${{ inputs.sources }} \
             --step ${{ inputs.step_m }} \
             --sleep ${{ inputs.sleep_s }}
-          mkdir -p ../out/${{ inputs.region }}-cankaya
-          cp -r data/raw/cankaya/${{ inputs.region }}/. ../out/${{ inputs.region }}-cankaya/
+          mkdir -p ../out/${{ inputs.region }}-maks
+          cp -r data/raw/maks/${{ inputs.region }}/. ../out/${{ inputs.region }}-maks/
 
       - name: Pack
         run: |
-          cp regions/${{ inputs.region }}.yaml DATA_LICENSES.md out/${{ inputs.region }}-cankaya/
-          tar -C out -czf ${{ inputs.region }}-cnk-$(date +%Y%m%d).tar.gz ${{ inputs.region }}-cankaya
+          cp regions/${{ inputs.region }}.yaml DATA_LICENSES.md out/${{ inputs.region }}-maks/
+          tar -C out -czf ${{ inputs.region }}-maks-$(date +%Y%m%d).tar.gz ${{ inputs.region }}-maks
 
       - name: Upload to private data repo
         env:
           GH_TOKEN: ${{ secrets.DATA_REPO_TOKEN }}
           DATA_REPO: NikinGames/maps-dataset-data
         run: |
-          tag="cnk-$(date +%Y%m%d)"
+          tag="maks-$(date +%Y%m%d)"
           gh release view "$tag" -R "$DATA_REPO" >/dev/null 2>&1 || \
-            gh release create "$tag" -R "$DATA_REPO" --title "$tag" --notes "Çankaya MAKS scan $tag"
+            gh release create "$tag" -R "$DATA_REPO" --title "$tag" --notes "MAKS scan $tag"
           gh release upload "$tag" *.tar.gz -R "$DATA_REPO" --clobber
+
+      - name: Push to Google Drive
+        uses: ./.github/actions/drive-push
+        with:
+          pattern: "*.tar.gz"
+          subpath: maks
+          rclone_conf: ${{ secrets.RCLONE_CONF }}
