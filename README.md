@@ -17,7 +17,9 @@ anything derived from them.
 - `scan.yml` — matrix job: checks out the pipeline from `NikinGames/3dworldgame`, runs
   `pipeline.cli fetch` per region, packs `data/raw/<id>` + DEM tiles + `manifest.json`
   (sha256, bbox, fetch date) into one archive per region.
-- Publishing a GitHub Release attaches the archives; with the Zenodo-GitHub integration
-  enabled for this repo, each release gets a versioned DOI (`.zenodo.json` holds metadata).
+- Data is stored privately: archives are uploaded as release assets of the private repo
+  `NikinGames/maps-dataset-data` (secret `DATA_REPO_TOKEN`). This public repo only holds code,
+  so Actions minutes are free and no data is redistributed. Zenodo publishing is optional
+  later (`.zenodo.json` kept for that).
 
 Add a region: drop a YAML into `regions/`, add its id to the matrix in `scan.yml`.

@@ -4,8 +4,6 @@ on:
   workflow_dispatch:
   schedule:
     - cron: "0 3 1 * *" # monthly
-  release:
-    types: [published]
 
 permissions:
   contents: write
@@ -39,13 +37,13 @@ jobs:
           cp regions/${{ matrix.region }}.yaml DATA_LICENSES.md out/${{ matrix.region }}/
           tar -C out -czf ${{ matrix.region }}-$(date +%Y%m%d).tar.gz ${{ matrix.region }}
 
-      - uses: actions/upload-artifact@v4
-        with:
-          name: ${{ matrix.region }}
-          path: "*.tar.gz"
-
-      - name: Attach to release
-        if: github.event_name == 'release'
+      # Data never touches this public repo: no artifacts, no releases here.
+      # It is uploaded as a release asset of the PRIVATE data repo.
+      - name: Upload to private data repo
         env:
-          GH_TOKEN: ${{ github.token }}
-        run: gh release upload "${{ github.event.release.tag_name }}" *.tar.gz --clobber
+          GH_TOKEN: ${{ secrets.DATA_REPO_TOKEN }}
+          DATA_REPO: NikinGames/maps-dataset-data
+        run: |
+          tag="scan-$(date +%Y%m%d)"
+          gh release view "$tag" -R "$DATA_REPO" >/dev/null 2>&1 ||             gh release create "$tag" -R "$DATA_REPO" --title "$tag" --notes "Automated scan $tag"
+          gh release upload "$tag" *.tar.gz -R "$DATA_REPO" --clobber
