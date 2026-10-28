@@ -1,0 +1,16 @@
+# Kızılay merkez — oynanabilir test bölgesi (~2.5 x 2.3 km)
+# Sıhhiye (kuzey) -> Kızılay Meydanı / Güvenpark -> Kocatepe Camii / TBMM (güney)
+id: kizilay_merkez
+name: "Kızılay Merkez, Ankara"
+description: "Sıhhiye - Kızılay - Kocatepe - Bakanlıklar (Godot viewer test bölgesi)"
+# bbox: [south, west, north, east]  (WGS84)
+bbox: [39.9080, 32.8430, 39.9300, 32.8720]
+crs_utm: "EPSG:32636"
+style_ref: ankara
+district: kizilay
+chunks: 4
+dem_zoom: 14
+landuse_splat: true
+vegetation: true
+props: true
+attribution: "© OpenStreetMap katkıcıları (ODbL) | Yükseklik: Copernicus DEM GLO-30"

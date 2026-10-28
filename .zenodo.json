@@ -1,0 +1,11 @@
+{
+  "title": "NikinGames maps dataset: automatically scanned OSM + Copernicus DEM regions",
+  "upload_type": "dataset",
+  "description": "Per-region raw extracts (OpenStreetMap vector data and Copernicus DEM terrain tiles) produced by the open Ankara 3D World pipeline. Data is ODbL; see DATA_LICENSES.md.",
+  "license": "odc-odbl",
+  "creators": [{"name": "NikinGames"}],
+  "keywords": ["OpenStreetMap", "Copernicus DEM", "Ankara", "geospatial", "procedural generation"],
+  "related_identifiers": [
+    {"relation": "isDerivedFrom", "identifier": "https://github.com/NikinGames/3dworldgame", "scheme": "url"}
+  ]
+}

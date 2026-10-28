@@ -1,0 +1,51 @@
+name: Scan regions
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 3 1 * *" # monthly
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        region: [kizilay_merkez, ankara_central]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: NikinGames/3dworldgame
+          path: engine
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: engine/requirements.txt
+      - run: pip install -r engine/requirements.txt
+
+      - name: Fetch region
+        run: PYTHONPATH=engine python scripts/scan.py regions/${{ matrix.region }}.yaml out
+
+      - name: Pack
+        run: |
+          cp regions/${{ matrix.region }}.yaml DATA_LICENSES.md out/${{ matrix.region }}/
+          tar -C out -czf ${{ matrix.region }}-$(date +%Y%m%d).tar.gz ${{ matrix.region }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.region }}
+          path: "*.tar.gz"
+
+      - name: Attach to release
+        if: github.event_name == 'release'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "${{ github.event.release.tag_name }}" *.tar.gz --clobber

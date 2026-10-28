@@ -1,0 +1,14 @@
+# Ankara merkez genişletilmiş — manuel/haftalık çalıştırma (CI matrix'inde "big")
+id: ankara_central
+name: "Ankara Merkez (Büyükşehir Çekirdeği)"
+description: "Ulus - Kızılay - Çankaya - Bahçeyevler ekseni"
+bbox: [39.8900, 32.8000, 39.9600, 32.9000]
+crs_utm: "EPSG:32636"
+style_ref: ankara
+district: mixed
+chunks: 8
+dem_zoom: 13
+landuse_splat: true
+vegetation: true
+props: true
+attribution: "© OpenStreetMap katkıcıları (ODbL) | Yükseklik: Copernicus DEM GLO-30"
