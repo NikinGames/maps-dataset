@@ -1,0 +1,86 @@
+name: Scan via Apify (SV + Yandex + Overture)
+
+on:
+  workflow_dispatch:
+    inputs:
+      region:
+        required: true
+        default: kizilay_merkez
+      which:
+        description: "sv, yandex, overture, all"
+        required: false
+        default: all
+      sv_step_m:
+        required: false
+        default: "60"
+      yandex_max_per_query:
+        required: false
+        default: "200"
+
+permissions:
+  contents: write
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: NikinGames/3dworldgame
+          path: engine
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: engine/requirements.txt
+      - run: pip install -r engine/requirements.txt
+
+      - name: Fetch (Overture)
+        if: ${{ inputs.which == 'all' || inputs.which == 'overture' }}
+        run: |
+          cd engine
+          python -m pipeline.cli overture --region ../regions/${{ inputs.region }}.yaml
+
+      - name: Fetch (Street View via Apify)
+        if: ${{ inputs.which == 'all' || inputs.which == 'sv' }}
+        env:
+          APIFY_TOKENS: ${{ secrets.APIFY_TOKENS }}
+        run: |
+          cd engine
+          python -m pipeline.cli sv-apify --region ../regions/${{ inputs.region }}.yaml --step ${{ inputs.sv_step_m }}
+
+      - name: Fetch (Yandex via Apify)
+        if: ${{ inputs.which == 'all' || inputs.which == 'yandex' }}
+        env:
+          APIFY_TOKENS: ${{ secrets.APIFY_TOKENS }}
+        run: |
+          cd engine
+          python -m pipeline.cli yandex --region ../regions/${{ inputs.region }}.yaml --max-per-query ${{ inputs.yandex_max_per_query }}
+
+      - name: Pack
+        run: |
+          mkdir -p out/${{ inputs.region }}-apify
+          [ -d engine/data/raw/overture/${{ inputs.region }} ] && cp -r engine/data/raw/overture/${{ inputs.region }} out/${{ inputs.region }}-apify/overture
+          [ -d engine/data/raw/streetview/${{ inputs.region }} ] && cp -r engine/data/raw/streetview/${{ inputs.region }} out/${{ inputs.region }}-apify/streetview
+          [ -d engine/data/raw/yandex/${{ inputs.region }} ] && cp -r engine/data/raw/yandex/${{ inputs.region }} out/${{ inputs.region }}-apify/yandex
+          cp regions/${{ inputs.region }}.yaml DATA_LICENSES.md out/${{ inputs.region }}-apify/
+          tar -C out -czf ${{ inputs.region }}-apify-$(date +%Y%m%d).tar.gz ${{ inputs.region }}-apify
+
+      - name: Upload to private data repo
+        env:
+          GH_TOKEN: ${{ secrets.DATA_REPO_TOKEN }}
+          DATA_REPO: NikinGames/maps-dataset-data
+        run: |
+          tag="apify-$(date +%Y%m%d)"
+          gh release view "$tag" -R "$DATA_REPO" >/dev/null 2>&1 || \
+            gh release create "$tag" -R "$DATA_REPO" --title "$tag" --notes "Apify batch $tag"
+          gh release upload "$tag" *.tar.gz -R "$DATA_REPO" --clobber
+
+      - name: Push to Google Drive
+        uses: ./.github/actions/drive-push
+        with:
+          pattern: "*.tar.gz"
+          subpath: apify
+          rclone_conf: ${{ secrets.RCLONE_CONF }}
