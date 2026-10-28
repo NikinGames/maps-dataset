@@ -1,4 +1,4 @@
-name: Scan via Apify (SV + Yandex + Overture)
+name: Scan Apify — paralel (7 token)
 
 on:
   workflow_dispatch:
@@ -6,10 +6,6 @@ on:
       region:
         required: true
         default: kizilay_merkez
-      which:
-        description: "sv, yandex, overture, all"
-        required: false
-        default: all
       sv_step_m:
         required: false
         default: "60"
@@ -21,9 +17,10 @@ permissions:
   contents: write
 
 jobs:
-  scan:
+  # Overture tek token bile istemez; bir seferlik, kaldıraç
+  overture:
     runs-on: ubuntu-latest
-    timeout-minutes: 180
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: actions/checkout@v4
@@ -36,50 +33,182 @@ jobs:
           cache: pip
           cache-dependency-path: engine/requirements.txt
       - run: pip install -r engine/requirements.txt
-
-      - name: Fetch (Overture)
-        if: ${{ inputs.which == 'all' || inputs.which == 'overture' }}
+      - name: Overture
         run: |
           cd engine
           python -m pipeline.cli overture --region ../regions/${{ inputs.region }}.yaml
+      - name: Pack & upload
+        env:
+          GH_TOKEN: ${{ secrets.DATA_REPO_TOKEN }}
+          DATA_REPO: NikinGames/maps-dataset-data
+        run: |
+          mkdir -p pack/overture
+          cp -r engine/data/raw/overture/${{ inputs.region }}/. pack/overture/
+          cp regions/${{ inputs.region }}.yaml DATA_LICENSES.md pack/
+          tar -C pack -czf ${{ inputs.region }}-ovt-$(date +%Y%m%d).tar.gz .
+          tag="apify-$(date +%Y%m%d)"
+          gh release view "$tag" -R "$DATA_REPO" >/dev/null 2>&1 || gh release create "$tag" -R "$DATA_REPO" --title "$tag" --notes "Apify batch $tag"
+          gh release upload "$tag" *.tar.gz -R "$DATA_REPO" --clobber
+      - uses: ./.github/actions/drive-push
+        with:
+          pattern: "*.tar.gz"
+          subpath: overture
+          rclone_conf: ${{ secrets.RCLONE_CONF }}
 
-      - name: Fetch (Street View via Apify)
-        if: ${{ inputs.which == 'all' || inputs.which == 'sv' }}
+  # 7 paralel Street View worker — grid kolon kolon bölünür
+  streetview:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5, 6]
+    env:
+      SHARD_COUNT: 7
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: NikinGames/3dworldgame
+          path: engine
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: engine/requirements.txt
+      - run: pip install -r engine/requirements.txt
+      - name: Pick token
         env:
           APIFY_TOKENS: ${{ secrets.APIFY_TOKENS }}
         run: |
+          IFS=',' read -ra ALL <<< "$APIFY_TOKENS"
+          i=${{ matrix.shard }}; n=${#ALL[@]}
+          [ $i -ge $n ] && { echo "shard $i >= $n token, skipping"; echo "SKIP=1" >> $GITHUB_ENV; exit 0; }
+          echo "APIFY_TOKENS=${ALL[$i]}" >> $GITHUB_ENV
+          echo "picked token index $i"
+      - name: Street View shard
+        if: env.SKIP != '1'
+        env:
+          SHARD_INDEX: ${{ matrix.shard }}
+        run: |
           cd engine
-          python -m pipeline.cli sv-apify --region ../regions/${{ inputs.region }}.yaml --step ${{ inputs.sv_step_m }}
+          python -c "
+          import os, sys
+          sys.path.insert(0,'.')
+          from pathlib import Path
+          from pipeline.config import load_region
+          from pipeline.fetch.apify_streetview import _grid, scan_region
+          from pipeline.fetch.apify import ApifyRotation, pick_actor
+          r = load_region('../regions/${{ inputs.region }}.yaml')
+          # grid 7 shardına böl, bu shard sadece kendi noktalarına baksın
+          step = ${{ inputs.sv_step_m }}
+          pts = _grid(r.bbox, float(step), r.crs_utm)
+          mine = pts[int(os.environ['SHARD_INDEX'])::int(os.environ['SHARD_COUNT'])]
+          print(f'shard {os.environ[\"SHARD_INDEX\"]}: {len(mine)} nokta')
+          # monkey-patch _grid döndürülenle çalışacak şekilde minimal çağrı
+          import pipeline.fetch.apify_streetview as mod
+          orig = mod._grid
+          mod._grid = lambda *a, **kw: mine
+          try:
+            scan_region(r.bbox,
+                        Path('data/raw/streetview')/r.id/f'shard_{os.environ[\"SHARD_INDEX\"]}',
+                        step_m=float(step), crs_utm=r.crs_utm)
+          finally:
+            mod._grid = orig
+          "
+      - uses: actions/upload-artifact@v4
+        if: env.SKIP != '1'
+        with:
+          name: sv-shard-${{ matrix.shard }}
+          path: engine/data/raw/streetview/${{ inputs.region }}/shard_${{ matrix.shard }}
 
-      - name: Fetch (Yandex via Apify)
-        if: ${{ inputs.which == 'all' || inputs.which == 'yandex' }}
+  # 7 paralel Yandex worker — her birine farklı sorgu dilimi
+  yandex:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5, 6]
+    env:
+      SHARD_COUNT: 7
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: NikinGames/3dworldgame
+          path: engine
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: engine/requirements.txt
+      - run: pip install -r engine/requirements.txt
+      - name: Pick token
         env:
           APIFY_TOKENS: ${{ secrets.APIFY_TOKENS }}
         run: |
+          IFS=',' read -ra ALL <<< "$APIFY_TOKENS"
+          i=${{ matrix.shard }}; n=${#ALL[@]}
+          [ $i -ge $n ] && { echo "SKIP=1" >> $GITHUB_ENV; exit 0; }
+          echo "APIFY_TOKENS=${ALL[$i]}" >> $GITHUB_ENV
+      - name: Yandex shard
+        if: env.SKIP != '1'
+        env:
+          SHARD_INDEX: ${{ matrix.shard }}
+          MAX_PER: ${{ inputs.yandex_max_per_query }}
+        run: |
           cd engine
-          python -m pipeline.cli yandex --region ../regions/${{ inputs.region }}.yaml --max-per-query ${{ inputs.yandex_max_per_query }}
+          python -c "
+          import os, sys
+          sys.path.insert(0,'.')
+          from pathlib import Path
+          from pipeline.config import load_region
+          from pipeline.fetch.yandex_places import DEFAULT_QUERIES, scan_region
+          r = load_region('../regions/${{ inputs.region }}.yaml')
+          qs = DEFAULT_QUERIES[int(os.environ['SHARD_INDEX'])::int(os.environ['SHARD_COUNT'])]
+          if not qs:
+            print('bu shard için sorgu yok'); sys.exit(0)
+          print('shard queries:', qs)
+          scan_region(r.bbox,
+                      Path('data/raw/yandex')/r.id/f'shard_{os.environ[\"SHARD_INDEX\"]}',
+                      queries=qs,
+                      max_places_per_query=int(os.environ['MAX_PER']))
+          "
+      - uses: actions/upload-artifact@v4
+        if: env.SKIP != '1'
+        with:
+          name: yx-shard-${{ matrix.shard }}
+          path: engine/data/raw/yandex/${{ inputs.region }}/shard_${{ matrix.shard }}
 
+  # Shardları topla, release ve Drive'a tek paket
+  merge:
+    needs: [streetview, yandex]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: shards
+          pattern: "{sv,yx}-shard-*"
       - name: Pack
         run: |
-          mkdir -p out/${{ inputs.region }}-apify
-          [ -d engine/data/raw/overture/${{ inputs.region }} ] && cp -r engine/data/raw/overture/${{ inputs.region }} out/${{ inputs.region }}-apify/overture
-          [ -d engine/data/raw/streetview/${{ inputs.region }} ] && cp -r engine/data/raw/streetview/${{ inputs.region }} out/${{ inputs.region }}-apify/streetview
-          [ -d engine/data/raw/yandex/${{ inputs.region }} ] && cp -r engine/data/raw/yandex/${{ inputs.region }} out/${{ inputs.region }}-apify/yandex
-          cp regions/${{ inputs.region }}.yaml DATA_LICENSES.md out/${{ inputs.region }}-apify/
-          tar -C out -czf ${{ inputs.region }}-apify-$(date +%Y%m%d).tar.gz ${{ inputs.region }}-apify
-
-      - name: Upload to private data repo
+          mkdir -p pack/streetview pack/yandex
+          find shards -path "*sv-shard-*" -type d -maxdepth 1 -exec cp -r {}/. pack/streetview/ \; || true
+          find shards -path "*yx-shard-*" -type d -maxdepth 1 -exec cp -r {}/. pack/yandex/ \; || true
+          cp regions/${{ inputs.region }}.yaml DATA_LICENSES.md pack/
+          tar -czf ${{ inputs.region }}-apify-$(date +%Y%m%d).tar.gz pack
+      - name: Upload release
         env:
           GH_TOKEN: ${{ secrets.DATA_REPO_TOKEN }}
           DATA_REPO: NikinGames/maps-dataset-data
         run: |
           tag="apify-$(date +%Y%m%d)"
-          gh release view "$tag" -R "$DATA_REPO" >/dev/null 2>&1 || \
-            gh release create "$tag" -R "$DATA_REPO" --title "$tag" --notes "Apify batch $tag"
+          gh release view "$tag" -R "$DATA_REPO" >/dev/null 2>&1 || gh release create "$tag" -R "$DATA_REPO" --title "$tag" --notes "Apify batch $tag"
           gh release upload "$tag" *.tar.gz -R "$DATA_REPO" --clobber
-
-      - name: Push to Google Drive
-        uses: ./.github/actions/drive-push
+      - uses: ./.github/actions/drive-push
         with:
           pattern: "*.tar.gz"
           subpath: apify
