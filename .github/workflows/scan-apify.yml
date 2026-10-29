@@ -1,26 +1,78 @@
-name: Scan Apify — paralel (7 token)
+name: Scan Apify — paralel
+
+# One job per data source, sharded across APIFY_TOKENS. Parallelism is bounded by the
+# number of tokens, not by how many times we retry a rejected one.
+#
+# Everything here used to fail at once:
+#   - the SV shard monkey-patched pipeline.fetch.apify_streetview._grid from inline
+#     YAML python; every token came back 401/403 because APIFY_TOKENS carried a UTF-8
+#     BOM (which also defeated GitHub's secret masking and leaked a live token);
+#   - the actor client called run-sync and then read defaultDatasetId, which is empty
+#     for these actors — run-sync-get-dataset-items is the correct call;
+#   - Overture was pinned to release 2026-10-01.0, which was never published;
+#   - an empty result was packed and published, producing a 1.3 kB "data" archive.
 
 on:
   workflow_dispatch:
     inputs:
       region:
+        description: "Region id in regions/*.yaml"
         required: true
         default: kizilay_merkez
       sv_step_m:
+        description: "Street View grid step (m) — cost scales with the square"
         required: false
-        default: "60"
+        default: "100"
+      sv_max_points:
+        description: "Max actor runs per shard"
+        required: false
+        default: "120"
       yandex_max_per_query:
+        description: "Max places per Yandex query"
         required: false
         default: "200"
+      shards:
+        description: "Parallel shards (<= number of tokens)"
+        required: false
+        default: "7"
+      skip_streetview:
+        description: "Skip the Apify Street View shards (1 = skip)"
+        required: false
+        default: "0"
 
 permissions:
   contents: write
 
+env:
+  DATA_REPO: NikinGames/maps-dataset-data
+
 jobs:
-  # Overture tek token bile istemez; bir seferlik, kaldıraç
+  # ---------------------------------------------------------------- tokens --
+  # Fail fast with a readable message instead of seven shards each discovering the
+  # same broken secret independently.
+  preflight:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      usable: ${{ steps.check.outputs.usable }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Check Apify tokens
+        id: check
+        continue-on-error: true
+        env:
+          APIFY_TOKENS: ${{ secrets.APIFY_TOKENS }}
+        run: python scripts/apify_preflight.py --gha
+
+  # -------------------------------------------------------------- overture --
+  # No token needed, so it runs even when Apify is down: the cheapest source of
+  # building footprints and places for a region.
   overture:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
       - uses: actions/checkout@v4
@@ -33,38 +85,40 @@ jobs:
           cache: pip
           cache-dependency-path: engine/requirements.txt
       - run: pip install -r engine/requirements.txt
-      - name: Overture
+
+      - name: Fetch Overture layers
+        env:
+          # Empty = the fetcher discovers the newest published release.
+          OVERTURE_RELEASE: ${{ vars.OVERTURE_RELEASE }}
         run: |
           cd engine
           python -m pipeline.cli overture --region ../regions/${{ inputs.region }}.yaml
+
       - name: Pack & upload
         env:
           GH_TOKEN: ${{ secrets.DATA_REPO_TOKEN }}
-          DATA_REPO: NikinGames/maps-dataset-data
         run: |
+          set -e
           mkdir -p pack/overture
           cp -r engine/data/raw/overture/${{ inputs.region }}/. pack/overture/
           cp regions/${{ inputs.region }}.yaml DATA_LICENSES.md pack/
           tar -C pack -czf ${{ inputs.region }}-ovt-$(date +%Y%m%d).tar.gz .
-          tag="apify-$(date +%Y%m%d)"
-          gh release view "$tag" -R "$DATA_REPO" >/dev/null 2>&1 || gh release create "$tag" -R "$DATA_REPO" --title "$tag" --notes "Apify batch $tag"
+          ls -lh *.tar.gz
+          tag="overture-$(date +%Y%m%d)"
+          gh release view "$tag" -R "$DATA_REPO" >/dev/null 2>&1 || \
+            gh release create "$tag" -R "$DATA_REPO" --title "$tag" --notes "Overture batch $tag"
           gh release upload "$tag" *.tar.gz -R "$DATA_REPO" --clobber
-      - uses: ./.github/actions/drive-push
-        with:
-          pattern: "*.tar.gz"
-          subpath: overture
-          rclone_conf: ${{ secrets.RCLONE_CONF }}
 
-  # 7 paralel Street View worker — grid kolon kolon bölünür
+  # ------------------------------------------------------------ streetview --
   streetview:
+    needs: preflight
+    if: needs.preflight.outputs.usable != '0' && inputs.skip_streetview != '1'
     runs-on: ubuntu-latest
     timeout-minutes: 180
     strategy:
       fail-fast: false
       matrix:
         shard: [0, 1, 2, 3, 4, 5, 6]
-    env:
-      SHARD_COUNT: 7
     steps:
       - uses: actions/checkout@v4
       - uses: actions/checkout@v4
@@ -77,61 +131,45 @@ jobs:
           cache: pip
           cache-dependency-path: engine/requirements.txt
       - run: pip install -r engine/requirements.txt
-      - name: Pick token
+
+      - name: Pick token for this shard
         env:
           APIFY_TOKENS: ${{ secrets.APIFY_TOKENS }}
-        run: |
-          IFS=',' read -ra ALL <<< "$APIFY_TOKENS"
-          i=${{ matrix.shard }}; n=${#ALL[@]}
-          [ $i -ge $n ] && { echo "shard $i >= $n token, skipping"; echo "SKIP=1" >> $GITHUB_ENV; exit 0; }
-          echo "APIFY_TOKENS=${ALL[$i]}" >> $GITHUB_ENV
-          echo "picked token index $i"
+          SHARD_INDEX: ${{ matrix.shard }}
+        run: python scripts/shard_token.py
+
       - name: Street View shard
-        if: env.SKIP != '1'
+        if: env.SHARD_SKIP != '1'
         env:
           SHARD_INDEX: ${{ matrix.shard }}
+          SHARD_COUNT: ${{ inputs.shards }}
         run: |
           cd engine
-          python -c "
-          import os, sys
-          sys.path.insert(0,'.')
-          from pathlib import Path
-          from pipeline.config import load_region
-          from pipeline.fetch.apify_streetview import _grid, scan_region
-          from pipeline.fetch.apify import ApifyRotation, pick_actor
-          r = load_region('../regions/${{ inputs.region }}.yaml')
-          # grid 7 shardına böl, bu shard sadece kendi noktalarına baksın
-          step = ${{ inputs.sv_step_m }}
-          pts = _grid(r.bbox, float(step), r.crs_utm)
-          mine = pts[int(os.environ['SHARD_INDEX'])::int(os.environ['SHARD_COUNT'])]
-          print(f'shard {os.environ[\"SHARD_INDEX\"]}: {len(mine)} nokta')
-          # monkey-patch _grid döndürülenle çalışacak şekilde minimal çağrı
-          import pipeline.fetch.apify_streetview as mod
-          orig = mod._grid
-          mod._grid = lambda *a, **kw: mine
-          try:
-            scan_region(r.bbox,
-                        Path('data/raw/streetview')/r.id/f'shard_{os.environ[\"SHARD_INDEX\"]}',
-                        step_m=float(step), crs_utm=r.crs_utm)
-          finally:
-            mod._grid = orig
-          "
+          python -m pipeline.cli sv-apify \
+            --region ../regions/${{ inputs.region }}.yaml \
+            --step ${{ inputs.sv_step_m }} \
+            --max-points ${{ inputs.sv_max_points }} \
+            --shard-index "$SHARD_INDEX" \
+            --shard-count "$SHARD_COUNT"
+
       - uses: actions/upload-artifact@v4
-        if: env.SKIP != '1'
+        if: env.SHARD_SKIP != '1'
         with:
           name: sv-shard-${{ matrix.shard }}
           path: engine/data/raw/streetview/${{ inputs.region }}/shard_${{ matrix.shard }}
+          if-no-files-found: warn
+          retention-days: 14
 
-  # 7 paralel Yandex worker — her birine farklı sorgu dilimi
+  # ---------------------------------------------------------------- yandex --
   yandex:
+    needs: preflight
+    if: needs.preflight.outputs.usable != '0'
     runs-on: ubuntu-latest
     timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:
         shard: [0, 1, 2, 3, 4, 5, 6]
-    env:
-      SHARD_COUNT: 7
     steps:
       - uses: actions/checkout@v4
       - uses: actions/checkout@v4
@@ -144,72 +182,80 @@ jobs:
           cache: pip
           cache-dependency-path: engine/requirements.txt
       - run: pip install -r engine/requirements.txt
-      - name: Pick token
+
+      - name: Pick token for this shard
         env:
           APIFY_TOKENS: ${{ secrets.APIFY_TOKENS }}
-        run: |
-          IFS=',' read -ra ALL <<< "$APIFY_TOKENS"
-          i=${{ matrix.shard }}; n=${#ALL[@]}
-          [ $i -ge $n ] && { echo "SKIP=1" >> $GITHUB_ENV; exit 0; }
-          echo "APIFY_TOKENS=${ALL[$i]}" >> $GITHUB_ENV
+          SHARD_INDEX: ${{ matrix.shard }}
+        run: python scripts/shard_token.py
+
       - name: Yandex shard
-        if: env.SKIP != '1'
+        if: env.SHARD_SKIP != '1'
         env:
           SHARD_INDEX: ${{ matrix.shard }}
+          SHARD_COUNT: ${{ inputs.shards }}
           MAX_PER: ${{ inputs.yandex_max_per_query }}
+          REGION_ID: ${{ inputs.region }}
         run: |
           cd engine
-          python -c "
-          import os, sys
-          sys.path.insert(0,'.')
-          from pathlib import Path
-          from pipeline.config import load_region
-          from pipeline.fetch.yandex_places import DEFAULT_QUERIES, scan_region
-          r = load_region('../regions/${{ inputs.region }}.yaml')
-          qs = DEFAULT_QUERIES[int(os.environ['SHARD_INDEX'])::int(os.environ['SHARD_COUNT'])]
-          if not qs:
-            print('bu shard için sorgu yok'); sys.exit(0)
-          print('shard queries:', qs)
-          scan_region(r.bbox,
-                      Path('data/raw/yandex')/r.id/f'shard_{os.environ[\"SHARD_INDEX\"]}',
-                      queries=qs,
-                      max_places_per_query=int(os.environ['MAX_PER']))
-          "
+          python ../scripts/yandex_shard.py "$REGION_ID" "$SHARD_INDEX" "$SHARD_COUNT" "$MAX_PER"
+
       - uses: actions/upload-artifact@v4
-        if: env.SKIP != '1'
+        if: env.SHARD_SKIP != '1'
         with:
           name: yx-shard-${{ matrix.shard }}
           path: engine/data/raw/yandex/${{ inputs.region }}/shard_${{ matrix.shard }}
+          if-no-files-found: warn
+          retention-days: 14
 
-  # Shardları topla, release ve Drive'a tek paket
+  # ----------------------------------------------------------------- merge --
   merge:
-    needs: [streetview, yandex]
+    needs: [preflight, overture]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/download-artifact@v4
+        continue-on-error: true
         with:
-          path: shards
-          pattern: "{sv,yx}-shard-*"
-      - name: Pack
+          path: artifacts
+          pattern: "*-shard-*"
+
+      - name: Merge shards
         run: |
-          mkdir -p pack/streetview pack/yandex
-          find shards -path "*sv-shard-*" -type d -maxdepth 1 -exec cp -r {}/. pack/streetview/ \; || true
-          find shards -path "*yx-shard-*" -type d -maxdepth 1 -exec cp -r {}/. pack/yandex/ \; || true
-          cp regions/${{ inputs.region }}.yaml DATA_LICENSES.md pack/
-          tar -czf ${{ inputs.region }}-apify-$(date +%Y%m%d).tar.gz pack
-      - name: Upload release
+          set -e
+          mkdir -p merged/streetview merged/yandex
+          for d in artifacts/sv-shard-*; do
+            [ -d "$d" ] || continue
+            cp -r "$d"/. merged/streetview/ 2>/dev/null || true
+          done
+          for d in artifacts/yx-shard-*; do
+            [ -d "$d" ] || continue
+            cp -r "$d"/. merged/yandex/ 2>/dev/null || true
+          done
+          for sub in streetview yandex; do
+            n=$(find "merged/$sub" -type f 2>/dev/null | wc -l)
+            echo "$sub: $n files"
+          done
+
+      - name: Pack & upload
         env:
           GH_TOKEN: ${{ secrets.DATA_REPO_TOKEN }}
-          DATA_REPO: NikinGames/maps-dataset-data
         run: |
+          set -e
+          # Do not publish an empty archive: a 1.3 kB release asset was the only
+          # trace of a full scan day before this guard existed.
+          payload=$(find merged -type f 2>/dev/null | wc -l)
+          if [ "$payload" -eq 0 ]; then
+            echo "::warning::Nothing collected; skipping upload."
+            exit 0
+          fi
+          cp regions/${{ inputs.region }}.yaml DATA_LICENSES.md merged/
+          tar -C merged -czf ${{ inputs.region }}-apify-$(date +%Y%m%d).tar.gz .
+          ls -lh *.tar.gz
           tag="apify-$(date +%Y%m%d)"
-          gh release view "$tag" -R "$DATA_REPO" >/dev/null 2>&1 || gh release create "$tag" -R "$DATA_REPO" --title "$tag" --notes "Apify batch $tag"
+          gh release view "$tag" -R "$DATA_REPO" >/dev/null 2>&1 || \
+            gh release create "$tag" -R "$DATA_REPO" --title "$tag" --notes "Apify batch $tag"
           gh release upload "$tag" *.tar.gz -R "$DATA_REPO" --clobber
-      - uses: ./.github/actions/drive-push
-        with:
-          pattern: "*.tar.gz"
-          subpath: apify
-          rclone_conf: ${{ secrets.RCLONE_CONF }}
