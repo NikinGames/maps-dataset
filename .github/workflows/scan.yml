@@ -2,14 +2,55 @@ name: Scan regions
 
 on:
   workflow_dispatch:
+    inputs:
+      region:
+        description: "Region id, or 'all' for every region in the matrix"
+        required: false
+        default: "all"
   schedule:
     - cron: "0 3 1 * *" # monthly
 
 permissions:
   contents: write
 
+env:
+  DATA_REPO: NikinGames/maps-dataset-data
+
 jobs:
+  # Verifies DATA_REPO_TOKEN before the matrix starts. Without this the failure
+  # surfaced as `HTTP 404: Not Found (.../releases)` inside each region job, which
+  # reads like a missing repository rather than a missing permission.
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      ok: ${{ steps.probe.outputs.ok }}
+    steps:
+      - name: Probe data repo access
+        id: probe
+        env:
+          GH_TOKEN: ${{ secrets.DATA_REPO_TOKEN }}
+        run: |
+          set +e
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::warning::DATA_REPO_TOKEN is not set; uploads will be skipped."
+            echo "ok=0" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # An explicit token is required: the default GITHUB_TOKEN cannot see a
+          # private repo in another owner namespace.
+          out=$(GH_TOKEN="$GH_TOKEN" gh api "repos/$DATA_REPO" --jq '.full_name' 2>&1)
+          code=$?
+          if [ $code -ne 0 ]; then
+            echo "::warning::DATA_REPO_TOKEN cannot read $DATA_REPO: $out"
+            echo "ok=0" >> "$GITHUB_OUTPUT"
+          else
+            echo "Data repo reachable: $out"
+            echo "ok=1" >> "$GITHUB_OUTPUT"
+          fi
+
   scan:
+    needs: check
     runs-on: ubuntu-latest
     timeout-minutes: 45
     strategy:
@@ -29,26 +70,45 @@ jobs:
           cache-dependency-path: engine/requirements.txt
       - run: pip install -r engine/requirements.txt
 
+      - name: Skip when a different region was requested
+        id: gate
+        run: |
+          want="${{ inputs.region }}"
+          if [ -n "$want" ] && [ "$want" != "all" ] && [ "$want" != "${{ matrix.region }}" ]; then
+            echo "skip=1" >> "$GITHUB_OUTPUT"
+            echo "Not $want; skipping ${{ matrix.region }}."
+          else
+            echo "skip=0" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Fetch region
+        if: steps.gate.outputs.skip != '1'
         run: PYTHONPATH=engine python scripts/scan.py regions/${{ matrix.region }}.yaml out
 
       - name: Pack
+        if: steps.gate.outputs.skip != '1'
         run: |
+          set -e
           cp regions/${{ matrix.region }}.yaml DATA_LICENSES.md out/${{ matrix.region }}/
           tar -C out -czf ${{ matrix.region }}-$(date +%Y%m%d).tar.gz ${{ matrix.region }}
+          ls -lh *.tar.gz
 
       # Data never touches this public repo: no artifacts, no releases here.
-      # It is uploaded as a release asset of the PRIVATE data repo.
+      # It goes out as a release asset of the PRIVATE data repo.
       - name: Upload to private data repo
+        if: steps.gate.outputs.skip != '1' && needs.check.outputs.ok == '1'
         env:
           GH_TOKEN: ${{ secrets.DATA_REPO_TOKEN }}
-          DATA_REPO: NikinGames/maps-dataset-data
         run: |
+          set -e
           tag="scan-$(date +%Y%m%d)"
-          gh release view "$tag" -R "$DATA_REPO" >/dev/null 2>&1 ||             gh release create "$tag" -R "$DATA_REPO" --title "$tag" --notes "Automated scan $tag"
-          gh release upload "$tag" *.tar.gz -R "$DATA_REPO" --clobber
+          gh release view "$tag" -R "$DATA_REPO" >/dev/null 2>&1 || \
+            gh release create "$tag" -R "$DATA_REPO" --title "$tag" --notes "Automated scan $tag"
+          gh release upload "$tag" ${{ matrix.region }}-*.tar.gz -R "$DATA_REPO" --clobber
+          echo "Uploaded to $DATA_REPO@$tag"
 
       - name: Push to Google Drive
+        if: steps.gate.outputs.skip != '1'
         uses: ./.github/actions/drive-push
         with:
           pattern: "*.tar.gz"
