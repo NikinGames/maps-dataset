@@ -75,10 +75,14 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
+      # 3dworldgame is private, so the workflow's own GITHUB_TOKEN cannot read it:
+      # checkout fails with `Not Found` and every job downstream dies. DATA_REPO_TOKEN
+      # must be a fine-grained PAT that covers BOTH repos (see README).
       - uses: actions/checkout@v4
         with:
           repository: NikinGames/3dworldgame
           path: engine
+          token: ${{ secrets.DATA_REPO_TOKEN }}
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
@@ -121,10 +125,14 @@ jobs:
         shard: [0, 1, 2, 3, 4, 5, 6]
     steps:
       - uses: actions/checkout@v4
+      # 3dworldgame is private, so the workflow's own GITHUB_TOKEN cannot read it:
+      # checkout fails with `Not Found` and every job downstream dies. DATA_REPO_TOKEN
+      # must be a fine-grained PAT that covers BOTH repos (see README).
       - uses: actions/checkout@v4
         with:
           repository: NikinGames/3dworldgame
           path: engine
+          token: ${{ secrets.DATA_REPO_TOKEN }}
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
@@ -172,10 +180,14 @@ jobs:
         shard: [0, 1, 2, 3, 4, 5, 6]
     steps:
       - uses: actions/checkout@v4
+      # 3dworldgame is private, so the workflow's own GITHUB_TOKEN cannot read it:
+      # checkout fails with `Not Found` and every job downstream dies. DATA_REPO_TOKEN
+      # must be a fine-grained PAT that covers BOTH repos (see README).
       - uses: actions/checkout@v4
         with:
           repository: NikinGames/3dworldgame
           path: engine
+          token: ${{ secrets.DATA_REPO_TOKEN }}
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
