@@ -1,5 +1,12 @@
 name: Scan 3D Tiles
 
+# Google Photorealistic 3D Tiles needs a Map Tiles API session before any tileset
+# request; calling root.json with only `key=` returns 404. The fetcher now creates and
+# refreshes that session itself, so this workflow only passes the key through.
+#
+# Licensing: these tiles are for measurement and visual reference only. They must not
+# ship in a game build; see DATA_LICENSES.md.
+
 on:
   workflow_dispatch:
     inputs:
@@ -8,7 +15,7 @@ on:
         required: true
         default: kizilay_merkez
       target_error:
-        description: "Target geometric error (smaller = finer LOD)"
+        description: "Target geometric error (smaller = finer LOD, more tiles)"
         required: false
         default: "20"
       max_tiles:
@@ -18,6 +25,9 @@ on:
 
 permissions:
   contents: write
+
+env:
+  DATA_REPO: NikinGames/maps-dataset-data
 
 jobs:
   scan:
@@ -36,6 +46,16 @@ jobs:
           cache-dependency-path: engine/requirements.txt
       - run: pip install -r engine/requirements.txt
 
+      - name: Check API key presence
+        env:
+          GOOGLE_MAPS_API_KEY: ${{ secrets.GOOGLE_MAPS_API_KEY }}
+        run: |
+          if [ -z "$GOOGLE_MAPS_API_KEY" ]; then
+            echo "::error::GOOGLE_MAPS_API_KEY secret is not set."
+            exit 1
+          fi
+          echo "key present (${#GOOGLE_MAPS_API_KEY} chars)"
+
       - name: Fetch 3D Tiles
         env:
           GOOGLE_MAPS_API_KEY: ${{ secrets.GOOGLE_MAPS_API_KEY }}
@@ -43,24 +63,15 @@ jobs:
           T3D_MAX_TILES: ${{ inputs.max_tiles }}
         run: PYTHONPATH=engine python scripts/scan_tiles3d.py regions/${{ inputs.region }}.yaml out
 
-      - name: Pack
-        run: |
-          cp regions/${{ inputs.region }}.yaml DATA_LICENSES.md out/${{ inputs.region }}-tiles3d/
-          tar -C out -czf ${{ inputs.region }}-t3d-$(date +%Y%m%d).tar.gz ${{ inputs.region }}-tiles3d
-
-      - name: Upload to private data repo
+      - name: Pack & upload
         env:
           GH_TOKEN: ${{ secrets.DATA_REPO_TOKEN }}
-          DATA_REPO: NikinGames/maps-dataset-data
         run: |
+          set -e
+          cp regions/${{ inputs.region }}.yaml DATA_LICENSES.md out/${{ inputs.region }}-tiles3d/
+          tar -C out -czf ${{ inputs.region }}-t3d-$(date +%Y%m%d).tar.gz ${{ inputs.region }}-tiles3d
+          ls -lh *.tar.gz
           tag="t3d-$(date +%Y%m%d)"
           gh release view "$tag" -R "$DATA_REPO" >/dev/null 2>&1 || \
             gh release create "$tag" -R "$DATA_REPO" --title "$tag" --notes "3D Tiles scan $tag"
           gh release upload "$tag" *.tar.gz -R "$DATA_REPO" --clobber
-
-      - name: Push to Google Drive
-        uses: ./.github/actions/drive-push
-        with:
-          pattern: "*.tar.gz"
-          subpath: tiles3d
-          rclone_conf: ${{ secrets.RCLONE_CONF }}
