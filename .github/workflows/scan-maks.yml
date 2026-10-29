@@ -1,27 +1,38 @@
 name: Scan MAKS (belediye GeoServer'ları)
 
+# Municipal WMS layers: building footprints with floor counts, parcels, door numbers,
+# street signs. This is the highest-value source for a city generator, because OSM has
+# height or levels data for under 10 % of Ankara's buildings.
+#
+# The old workflow called `pipeline.cli cankaya`, which no longer exists as a separate
+# subcommand (it is the alias `maks --sources cankaya`); the run died with
+# `invalid choice: 'cankaya'`. It now goes through `maks` directly.
+
 on:
   workflow_dispatch:
     inputs:
       region:
-        description: "regions/*.yaml içindeki id"
+        description: "Region id in regions/*.yaml"
         required: true
         default: kizilay_merkez
       sources:
-        description: "boşluk ayrımlı kaynak id'leri (boş = engine'deki tümü)"
+        description: "Space-separated source ids (blank = every source in config/maks_sources.yaml)"
         required: false
         default: "cankaya"
       step_m:
-        description: "Grid hücresi (m)"
+        description: "Grid cell size (m)"
         required: false
         default: "150"
       sleep_s:
-        description: "İstek arası uyku (s)"
+        description: "Delay between requests (s)"
         required: false
         default: "0.3"
 
 permissions:
   contents: write
+
+env:
+  DATA_REPO: NikinGames/maps-dataset-data
 
 jobs:
   scan:
@@ -41,26 +52,59 @@ jobs:
       - run: pip install -r engine/requirements.txt
 
       - name: Scan MAKS
+        env:
+          SOURCES: ${{ inputs.sources }}
         run: |
+          set -e
           cd engine
+          # Unquoted on purpose: the CLI expects `--sources` followed by one or more ids.
           python -m pipeline.cli maks \
             --region ../regions/${{ inputs.region }}.yaml \
-            --sources ${{ inputs.sources }} \
+            --sources $SOURCES \
             --step ${{ inputs.step_m }} \
             --sleep ${{ inputs.sleep_s }}
           mkdir -p ../out/${{ inputs.region }}-maks
           cp -r data/raw/maks/${{ inputs.region }}/. ../out/${{ inputs.region }}-maks/
 
+      - name: Verify something was collected
+        run: |
+          set -e
+          n=$(find out/${{ inputs.region }}-maks -name '*.geojson' 2>/dev/null | wc -l)
+          echo "geojson layers: $n"
+          if [ "$n" -eq 0 ]; then
+            echo "::error::MAKS returned no layers. The municipal GeoServer may be down or its"
+            echo "::error::layer names may have changed; check config/maks_sources.yaml."
+            exit 1
+          fi
+          # Total feature count across layers, so an all-empty scan is visible in the log.
+          python - <<'PY'
+          import json, pathlib
+          total = 0
+          for p in sorted(pathlib.Path("out").rglob("*.geojson")):
+              try:
+                  data = json.loads(p.read_text(encoding="utf-8"))
+              except Exception:
+                  continue
+              n = len(data.get("features", []))
+              total += n
+              print(f"  {p.name}: {n}")
+          print(f"total features: {total}")
+          if total == 0:
+              raise SystemExit("All MAKS layers are empty.")
+          PY
+
       - name: Pack
         run: |
+          set -e
           cp regions/${{ inputs.region }}.yaml DATA_LICENSES.md out/${{ inputs.region }}-maks/
           tar -C out -czf ${{ inputs.region }}-maks-$(date +%Y%m%d).tar.gz ${{ inputs.region }}-maks
+          ls -lh *.tar.gz
 
       - name: Upload to private data repo
         env:
           GH_TOKEN: ${{ secrets.DATA_REPO_TOKEN }}
-          DATA_REPO: NikinGames/maps-dataset-data
         run: |
+          set -e
           tag="maks-$(date +%Y%m%d)"
           gh release view "$tag" -R "$DATA_REPO" >/dev/null 2>&1 || \
             gh release create "$tag" -R "$DATA_REPO" --title "$tag" --notes "MAKS scan $tag"
