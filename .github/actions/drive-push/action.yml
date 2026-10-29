@@ -1,5 +1,6 @@
 name: "Drive push"
-description: "Push archives to a configured rclone remote (noop if secret absent)."
+description: "Push archives to an rclone remote. Skips cleanly when the secret is absent; fails loudly when it is malformed."
+
 inputs:
   pattern:
     description: "Glob pattern of files to upload"
@@ -9,28 +10,74 @@ inputs:
     description: "Subdirectory under DRIVE_ROOT"
     required: true
   rclone_conf:
-    description: "RCLONE_CONF secret value"
+    description: "RCLONE_CONF secret value (the full rclone.conf text)"
     required: true
   drive_remote:
-    description: "rclone remote name (default: gdrive)"
+    description: "rclone remote name"
     required: false
     default: "gdrive"
   drive_root:
-    description: "Base path on the remote (default: ankara3d/data)"
+    description: "Base path on the remote"
     required: false
     default: "ankara3d/data"
+
 runs:
   using: "composite"
   steps:
     - shell: bash
+      env:
+        # Passed through env, never interpolated into the script: a config file
+        # containing `$` or quotes used to break the heredoc.
+        RCLONE_CONF: ${{ inputs.rclone_conf }}
+        PATTERN: ${{ inputs.pattern }}
+        DRIVE_REMOTE: ${{ inputs.drive_remote }}
+        DRIVE_ROOT: ${{ inputs.drive_root }}
+        SUBPATH: ${{ inputs.subpath }}
       run: |
-        if [ -z "${{ inputs.rclone_conf }}" ]; then
-          echo "RCLONE_CONF yok, Drive adımı atlandı."
+        set -euo pipefail
+
+        if [ -z "${RCLONE_CONF//[[:space:]]/}" ]; then
+          echo "RCLONE_CONF is not set; skipping the Drive step."
           exit 0
         fi
-        curl -s https://rclone.org/install.sh | sudo bash
-        mkdir -p ~/.config/rclone
-        printf '%s' "${{ inputs.rclone_conf }}" > ~/.config/rclone/rclone.conf
-        dest="${{ inputs.drive_remote }}:${{ inputs.drive_root }}/${{ inputs.subpath }}/"
-        rclone copy ${{ inputs.pattern }} "$dest" --progress
-        echo "Drive'a yazıldı: $dest"
+
+        conf_path="$HOME/.config/rclone/rclone.conf"
+        mkdir -p "$(dirname "$conf_path")"
+        printf '%s\n' "$RCLONE_CONF" > "$conf_path"
+        chmod 600 "$conf_path"
+
+        # A config pasted as JSON, or with git conflict markers, used to fail deep
+        # inside rclone with `invalid character 'a' looking for beginning of object
+        # key string`. Validate the shape here so the error names the fix.
+        if ! grep -qE '^[[:space:]]*\[[^]]+\][[:space:]]*$' "$conf_path"; then
+          echo "::error::RCLONE_CONF does not look like an rclone.conf (no [remote] section)."
+          echo "Expected the contents of rclone.conf, for example:"
+          echo "  [gdrive]"
+          echo "  type = drive"
+          echo "  client_id = ..."
+          echo "  scope = drive"
+          echo "  token = {...}"
+          exit 1
+        fi
+
+        if ! grep -q "^\[${DRIVE_REMOTE}\]" "$conf_path"; then
+          remotes=$(grep -oE '^\[[^]]+\]' "$conf_path" | tr '\n' ' ')
+          echo "::error::RCLONE_CONF has no [${DRIVE_REMOTE}] remote (found: ${remotes})"
+          exit 1
+        fi
+
+        if ! command -v rclone >/dev/null 2>&1; then
+          curl -fsSL https://rclone.org/install.sh | sudo bash
+        fi
+
+        dest="${DRIVE_REMOTE}:${DRIVE_ROOT}/${SUBPATH}/"
+        shopt -s nullglob
+        files=( $PATTERN )
+        if [ ${#files[@]} -eq 0 ]; then
+          echo "No files match '$PATTERN'; nothing to push."
+          exit 0
+        fi
+
+        echo "Pushing ${#files[@]} file(s) to $dest"
+        rclone copy --progress --stats-one-line "${files[@]}" "$dest"
+        echo "Drive push done: $dest"
