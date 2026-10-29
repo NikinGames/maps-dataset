@@ -1,5 +1,12 @@
 name: Scan Street View
 
+# Metadata-only by default; heading JPEGs are billed, so they are opt-in.
+#
+# The old run reported "0 panoramas" after 2500 grid points with no error line, because
+# every non-OK metadata status (including REQUEST_DENIED) was treated like ZERO_RESULTS.
+# The fetcher now reports the status histogram and aborts with Google's own error
+# message when the key is rejected.
+
 on:
   workflow_dispatch:
     inputs:
@@ -11,13 +18,20 @@ on:
         description: "Grid step metres"
         required: false
         default: "50"
+      max_points:
+        description: "Grid point cap (metadata calls are free but slow)"
+        required: false
+        default: "3000"
       fetch_images:
-        description: "Also download heading images (billed)"
+        description: "Also download heading images (billed, 1 = yes)"
         required: false
         default: "0"
 
 permissions:
   contents: write
+
+env:
+  DATA_REPO: NikinGames/maps-dataset-data
 
 jobs:
   scan:
@@ -40,27 +54,27 @@ jobs:
         env:
           GOOGLE_SV_KEY: ${{ secrets.GOOGLE_SV_KEY }}
           SV_STEP_M: ${{ inputs.step_m }}
+          SV_MAX_POINTS: ${{ inputs.max_points }}
           SV_FETCH_IMAGES: ${{ inputs.fetch_images }}
-        run: PYTHONPATH=engine python scripts/scan_streetview.py regions/${{ inputs.region }}.yaml out
-
-      - name: Pack
         run: |
-          cp regions/${{ inputs.region }}.yaml DATA_LICENSES.md out/${{ inputs.region }}-streetview/
-          tar -C out -czf ${{ inputs.region }}-sv-$(date +%Y%m%d).tar.gz ${{ inputs.region }}-streetview
+          cd engine
+          python -m pipeline.cli streetview \
+            --region ../regions/${{ inputs.region }}.yaml \
+            --step "$SV_STEP_M" \
+            --max-points "$SV_MAX_POINTS" \
+            $( [ "$SV_FETCH_IMAGES" = "1" ] && echo --images )
+          mkdir -p ../out/${{ inputs.region }}-streetview
+          cp -r data/raw/streetview/${{ inputs.region }}/. ../out/${{ inputs.region }}-streetview/
 
-      - name: Upload to private data repo
+      - name: Pack & upload
         env:
           GH_TOKEN: ${{ secrets.DATA_REPO_TOKEN }}
-          DATA_REPO: NikinGames/maps-dataset-data
         run: |
+          set -e
+          cp regions/${{ inputs.region }}.yaml DATA_LICENSES.md out/${{ inputs.region }}-streetview/
+          tar -C out -czf ${{ inputs.region }}-sv-$(date +%Y%m%d).tar.gz ${{ inputs.region }}-streetview
+          ls -lh *.tar.gz
           tag="sv-$(date +%Y%m%d)"
           gh release view "$tag" -R "$DATA_REPO" >/dev/null 2>&1 || \
             gh release create "$tag" -R "$DATA_REPO" --title "$tag" --notes "Street View scan $tag"
           gh release upload "$tag" *.tar.gz -R "$DATA_REPO" --clobber
-
-      - name: Push to Google Drive
-        uses: ./.github/actions/drive-push
-        with:
-          pattern: "*.tar.gz"
-          subpath: streetview
-          rclone_conf: ${{ secrets.RCLONE_CONF }}
