@@ -259,10 +259,13 @@ jobs:
           set -e
           # Do not publish an empty archive: a 1.3 kB release asset was the only
           # trace of a full scan day before this guard existed.
-          payload=$(find merged -type f 2>/dev/null | wc -l)
+          # manifest.json is written even when a shard collected nothing, and an
+          # empty places.jsonl still counts as a file: count only data files
+          # with content, or a dead-token scan publishes a 1.2 kB archive again.
+          payload=$(find merged -type f ! -name 'manifest.json' -size +0c 2>/dev/null | wc -l)
           if [ "$payload" -eq 0 ]; then
-            echo "::warning::Nothing collected; skipping upload."
-            exit 0
+            echo "::error::Nothing collected (only empty manifests); refusing to publish an empty archive."
+            exit 1
           fi
           cp regions/${{ inputs.region }}.yaml DATA_LICENSES.md merged/
           tar -C merged -czf ${{ inputs.region }}-apify-$(date +%Y%m%d).tar.gz .
