@@ -17,6 +17,7 @@ import urllib.error
 import urllib.request
 
 API = "https://api.apify.com/v2/users/me"
+LIMITS_API = "https://api.apify.com/v2/users/me/limits"
 
 
 def clean(raw: str) -> list[str]:
@@ -39,18 +40,39 @@ def mask(token: str) -> str:
 
 
 def probe(token: str) -> tuple[bool, str]:
+    """Authenticate AND check the account can still run actors.
+
+    A valid token whose account is over its monthly usage limit authenticates
+    fine but every actor run returns 403 — exactly what happened on 2026-10-28:
+    a paid Street View actor billed ~$2 per run, seven free accounts went far
+    over their $5 caps, and preflight still said 7/7 OK. Checking limits here
+    makes the preflight honest about run eligibility, not just auth.
+    """
+    import json
+
     req = urllib.request.Request(f"{API}?token={token}")
     try:
         with urllib.request.urlopen(req, timeout=30) as resp:
             payload = resp.read().decode("utf-8", "replace")
-        import json
-
-        data = (json.loads(payload).get("data") or {})
-        return True, str(data.get("username", "?"))
+        data = json.loads(payload).get("data") or {}
+        name = str(data.get("username", "?"))
     except urllib.error.HTTPError as err:
         return False, f"HTTP {err.code}"
     except Exception as err:  # noqa: BLE001
         return False, type(err).__name__
+
+    try:
+        req = urllib.request.Request(f"{LIMITS_API}?token={token}")
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            lim = (json.loads(resp.read().decode("utf-8", "replace")).get("data") or {})
+        used = float(lim.get("current", {}).get("monthlyUsageUsd", 0.0))
+        cap = float(lim.get("limits", {}).get("maxMonthlyUsageUsd", 0.0))
+    except Exception:  # noqa: BLE001 - limit okunamazsa auth sonucu yeterli
+        return True, f"{name} (limit bilgisi okunamadi)"
+
+    if cap and used >= cap:
+        return False, f"{name}: OVER LIMIT (${used:.2f} / ${cap:.2f}) - actor run'lari 403 alir"
+    return True, f"{name} (${used:.2f} / ${cap:.2f} kullanildi)"
 
 
 def main() -> int:
