@@ -12,6 +12,11 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+# The workflow invokes this from the repo root; Python only puts the script's
+# own directory on sys.path, so `pipeline` (inside engine/) is not importable
+# without this. Add the engine dir explicitly.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "engine"))
+
 
 def main(argv: list[str]) -> int:
     if len(argv) < 5:
