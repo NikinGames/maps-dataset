@@ -222,7 +222,9 @@ jobs:
 
   # ----------------------------------------------------------------- merge --
   merge:
-    needs: [preflight, overture]
+    # yandex + streetview shard'lari DA bitmeli: needs listesinde olmayinca merge
+    # onlarla paralel kosuyor, artifact'ler daha yuklenmemisken bos paketliyor.
+    needs: [preflight, overture, yandex, streetview]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 30
